@@ -98,4 +98,17 @@ describe('extractSettledDiffs', () => {
     const out = narrowDiffs([{ path: '/f', oldText: null, newText: 'whole file' }])
     assert.deepEqual(out, [{ path: '/f', oldText: null, newText: 'whole file' }])
   })
+
+  test('narrowDiffs reuses an already-well-shaped hunk instead of allocating a copy', () => {
+    const hunk = { path: '/f', oldText: 'a', newText: 'b' }
+    const out = narrowDiffs([hunk])
+    assert.equal(out![0], hunk, 'a hunk with exactly {path, oldText, newText} should be returned by reference')
+  })
+
+  test('narrowDiffs still normalizes a hunk carrying extra properties', () => {
+    const hunk = { path: '/f', oldText: 'a', newText: 'b', extra: 'ignored' }
+    const out = narrowDiffs([hunk])
+    assert.notEqual(out![0], hunk, 'a hunk with extra keys must be rebuilt into the narrow shape')
+    assert.deepEqual(out, [{ path: '/f', oldText: 'a', newText: 'b' }])
+  })
 })

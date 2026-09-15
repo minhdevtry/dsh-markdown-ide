@@ -45,7 +45,15 @@ export function narrowDiffs(diffs: unknown): DiffHunk[] | null {
     if (typeof path !== 'string') return null
     if (oldText !== null && typeof oldText !== 'string') return null
     if (typeof newText !== 'string') return null
-    out.push({ path, oldText: (oldText as string | null) ?? null, newText })
+    // If the hunk already has exactly this shape (the common case — the
+    // host's own reconciliation payload), reuse it instead of allocating a
+    // fresh object per hunk: a settled call reconciling hundreds of hunks
+    // against a large file would otherwise churn one throwaway object each.
+    if (!Array.isArray(hunk) && Object.keys(hunk).length === 3) {
+      out.push(hunk as unknown as DiffHunk)
+    } else {
+      out.push({ path, oldText: oldText as string | null, newText })
+    }
   }
   return out
 }
