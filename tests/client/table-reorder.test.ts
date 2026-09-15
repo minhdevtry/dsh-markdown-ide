@@ -15,9 +15,13 @@ import { Editor } from '@tiptap/core'
 import type { Node as PmNode } from '@tiptap/pm/model'
 import { documentExtensions } from '../../src/client/tiptap/extensions.ts'
 import {
+  buildAxisSelection,
+  computeDragTarget,
+  FIRST_MOVABLE_ROW_INDEX,
   tableWithMovedRow,
   tableWithMovedColumn,
 } from '../../src/client/tiptap/table/tableReorder.ts'
+import { commitReorder } from '../../src/client/tiptap/table/useTableDragReorder.ts'
 
 describe('Table Drag Reorder', () => {
   function createTestEditor(md: string): Editor {
@@ -224,5 +228,250 @@ describe('Table Drag Reorder', () => {
     } finally {
       editor.destroy()
     }
+  })
+
+  test('boundary safety: source index === rows.length (one past last row) is treated as out of bounds', () => {
+    const md = `
+| H1 | H2 |
+| --- | --- |
+| A1 | A2 |
+| B1 | B2 |
+`
+    const editor = createTestEditor(md)
+    try {
+      const table = getFirstTable(editor)
+      const original = extractTableTexts(table)
+
+      assert.doesNotThrow(() => tableWithMovedRow(table, 3, 0))
+      assert.deepEqual(extractTableTexts(tableWithMovedRow(table, 3, 0)), original)
+      assert.deepEqual(extractTableTexts(tableWithMovedRow(table, 3, 5)), original)
+    } finally {
+      editor.destroy()
+    }
+  })
+
+  test('boundary safety: column source index === cells.length (one past last column) is treated as out of bounds', () => {
+    const md = `
+| Col1 | Col2 |
+| --- | --- |
+| A1 | A2 |
+`
+    const editor = createTestEditor(md)
+    try {
+      const table = getFirstTable(editor)
+      const original = extractTableTexts(table)
+
+      assert.doesNotThrow(() => tableWithMovedColumn(table, 2, 0))
+      assert.deepEqual(extractTableTexts(tableWithMovedColumn(table, 2, 0)), original)
+      assert.deepEqual(extractTableTexts(tableWithMovedColumn(table, 2, 5)), original)
+    } finally {
+      editor.destroy()
+    }
+  })
+
+  test('boundary safety: targetIndex === sourceIndex is a structural no-op (no throw, table intact)', () => {
+    const md = `
+| H1 | H2 | H3 |
+| --- | --- | --- |
+| A1 | A2 | A3 |
+| B1 | B2 | B3 |
+`
+    const editor = createTestEditor(md)
+    try {
+      const table = getFirstTable(editor)
+      const original = extractTableTexts(table)
+
+      assert.doesNotThrow(() => tableWithMovedRow(table, 1, 1))
+      assert.deepEqual(extractTableTexts(tableWithMovedRow(table, 1, 1)), original)
+      assert.doesNotThrow(() => tableWithMovedColumn(table, 1, 1))
+      assert.deepEqual(extractTableTexts(tableWithMovedColumn(table, 1, 1)), original)
+    } finally {
+      editor.destroy()
+    }
+  })
+
+  test('boundary safety: dragging the last row past itself keeps row pinned at the end', () => {
+    const md = `
+| H1 | H2 |
+| --- | --- |
+| A1 | A2 |
+| B1 | B2 |
+| C1 | C2 |
+`
+    const editor = createTestEditor(md)
+    try {
+      const table = getFirstTable(editor)
+
+      const moved = tableWithMovedRow(table, 3, 99)
+      assert.deepEqual(extractTableTexts(moved), [
+        ['H1', 'H2'],
+        ['A1', 'A2'],
+        ['B1', 'B2'],
+        ['C1', 'C2'],
+      ])
+    } finally {
+      editor.destroy()
+    }
+  })
+
+  test('boundary safety: dragging the last column past itself keeps column pinned at the end', () => {
+    const md = `
+| C1 | C2 | C3 |
+| --- | --- | --- |
+| A1 | A2 | A3 |
+`
+    const editor = createTestEditor(md)
+    try {
+      const table = getFirstTable(editor)
+      const original = extractTableTexts(table)
+
+      const moved = tableWithMovedColumn(table, 2, 99)
+      assert.deepEqual(extractTableTexts(moved), original)
+    } finally {
+      editor.destroy()
+    }
+  })
+
+  test('boundary safety: buildAxisSelection rejects negative or overflowing posInCell', () => {
+    const md = `
+| H1 | H2 |
+| --- | --- |
+| A1 | A2 |
+`
+    const editor = createTestEditor(md)
+    try {
+      const doc = editor.state.doc
+
+      assert.equal(buildAxisSelection(doc, -1, 'row'), null)
+      assert.equal(buildAxisSelection(doc, -10, 'column'), null)
+      assert.equal(buildAxisSelection(doc, doc.content.size + 5, 'row'), null)
+    } finally {
+      editor.destroy()
+    }
+  })
+
+  test('boundary safety: buildAxisSelection returns null for invalid position', () => {
+    const md = `
+| H1 | H2 |
+| --- | --- |
+| A1 | A2 |
+`
+    const editor = createTestEditor(md)
+    try {
+      const doc = editor.state.doc
+      assert.equal(buildAxisSelection(doc, 0, 'row'), null)
+    } finally {
+      editor.destroy()
+    }
+  })
+
+  test('boundary safety: computeDragTarget returns null when no table is reachable', () => {
+    const detached = dom.window.document.createElement('td') as any
+    const result = computeDragTarget(detached, 'row', 10, 10)
+    assert.equal(result, null)
+  })
+
+  test('boundary safety: computeDragTarget returns null for an empty table', () => {
+    const emptyTable = dom.window.document.createElement('table')
+    dom.window.document.body.appendChild(emptyTable)
+    const anchor = dom.window.document.createElement('td')
+    emptyTable.appendChild(anchor)
+    try {
+      const result = computeDragTarget(anchor as any, 'row', 10, 10)
+      assert.equal(result, null)
+    } finally {
+      dom.window.document.body.removeChild(emptyTable)
+    }
+  })
+
+  test('boundary safety: commitReorder rejects non-finite targetIndex without dispatching', () => {
+    const md = `
+| H1 | H2 |
+| --- | --- |
+| A1 | A2 |
+| B1 | B2 |
+`
+    const editor = createTestEditor(md)
+    try {
+      const tableDom = editor.view.dom.querySelector('table')
+      const rowAnchor = tableDom?.querySelector('tbody tr:nth-child(2) td') as HTMLElement | null
+      assert.ok(rowAnchor, 'row anchor must be found')
+      assert.equal(rowAnchor.tagName, 'TD')
+
+      const original = editor.state.doc.toJSON()
+
+      assert.doesNotThrow(() => {
+        commitReorder(editor, rowAnchor as any, 'row', NaN)
+      })
+      assert.doesNotThrow(() => {
+        commitReorder(editor, rowAnchor as any, 'row', Infinity)
+      })
+      assert.doesNotThrow(() => {
+        commitReorder(editor, rowAnchor as any, 'row', -Infinity)
+      })
+
+      assert.deepEqual(editor.state.doc.toJSON(), original)
+    } finally {
+      editor.destroy()
+    }
+  })
+
+  test('boundary safety: commitReorder rejects targetIndex < FIRST_MOVABLE_ROW_INDEX for row axis', () => {
+    const md = `
+| H1 | H2 |
+| --- | --- |
+| A1 | A2 |
+| B1 | B2 |
+`
+    const editor = createTestEditor(md)
+    try {
+      const tableDom = editor.view.dom.querySelector('table')
+      const rowAnchor = tableDom?.querySelector('tbody tr:nth-child(2) td') as HTMLElement | null
+      assert.ok(rowAnchor, 'row anchor must be found')
+
+      const original = editor.state.doc.toJSON()
+
+      assert.doesNotThrow(() => {
+        commitReorder(editor, rowAnchor as any, 'row', 0)
+      })
+      assert.doesNotThrow(() => {
+        commitReorder(editor, rowAnchor as any, 'row', -5)
+      })
+
+      assert.deepEqual(editor.state.doc.toJSON(), original)
+    } finally {
+      editor.destroy()
+    }
+  })
+
+  test('boundary safety: commitReorder rejects source on header row', () => {
+    const md = `
+| H1 | H2 |
+| --- | --- |
+| A1 | A2 |
+| B1 | B2 |
+`
+    const editor = createTestEditor(md)
+    try {
+      const tableDom = editor.view.dom.querySelector('table')
+      const headerAnchor = tableDom?.querySelector('thead tr:first-child th') as HTMLElement | null
+      const fallbackHeaderAnchor = tableDom?.querySelector('tr:first-child td, tr:first-child th') as HTMLElement | null
+      const anchor = (headerAnchor ?? fallbackHeaderAnchor) as any
+      assert.ok(anchor, 'header anchor must be found')
+
+      const original = editor.state.doc.toJSON()
+
+      assert.doesNotThrow(() => {
+        commitReorder(editor, anchor, 'row', 3)
+      })
+
+      assert.deepEqual(editor.state.doc.toJSON(), original)
+    } finally {
+      editor.destroy()
+    }
+  })
+
+  test('boundary safety: FIRST_MOVABLE_ROW_INDEX constant value matches expected skip-header invariant', () => {
+    assert.equal(FIRST_MOVABLE_ROW_INDEX, 1)
   })
 })
