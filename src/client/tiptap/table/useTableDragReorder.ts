@@ -39,8 +39,9 @@ export function commitReorder(
   axis: TableAxis,
   targetIndex: number,
 ): void {
+  if (!Number.isFinite(targetIndex)) return
   const sourceIndex = axis === 'row' ? rowIndexOf(anchor) : anchor.cellIndex
-  if (sourceIndex < 0) return
+  if (!Number.isFinite(sourceIndex) || sourceIndex < 0) return
   if (axis === 'row') {
     if (sourceIndex < FIRST_MOVABLE_ROW_INDEX) return
     if (targetIndex < FIRST_MOVABLE_ROW_INDEX) return
