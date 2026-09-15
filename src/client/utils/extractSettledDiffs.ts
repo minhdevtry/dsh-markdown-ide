@@ -33,6 +33,12 @@ export interface SettledDiffSourceNode {
 
 /**
  * Narrow an unknown `meta.diffs` payload to well-formed hunks.
+ *
+ * Filters out no-op hunks (`oldText === newText`, both non-null strings):
+ * the settled reconciliation found zero change for that block, and a
+ * downstream block-diff pass over it would only churn the GC and pop a
+ * useless "review this" in the UI. A `write` fallback carries
+ * `oldText: null`, which is a creation, not a no-op, and never matches.
  * @param diffs - the metadata field to validate.
  * @returns the validated hunks, or null when the payload is not usable.
  */
@@ -45,6 +51,7 @@ export function narrowDiffs(diffs: unknown): DiffHunk[] | null {
     if (typeof path !== 'string') return null
     if (oldText !== null && typeof oldText !== 'string') return null
     if (typeof newText !== 'string') return null
+    if (oldText !== null && oldText === newText) continue
     // If the hunk already has exactly this shape (the common case — the
     // host's own reconciliation payload), reuse it instead of allocating a
     // fresh object per hunk: a settled call reconciling hundreds of hunks
@@ -55,6 +62,11 @@ export function narrowDiffs(diffs: unknown): DiffHunk[] | null {
       out.push({ path, oldText: oldText as string | null, newText })
     }
   }
+  // If filtering emptied the array, treat it as "no usable diff" rather
+  // than returning [] — callers already distinguish null (no review) from
+  // a non-empty hunks array (review this), and `[]` would land in the
+  // second bucket and waste one downstream iteration per settled call.
+  if (out.length === 0) return null
   return out
 }
 

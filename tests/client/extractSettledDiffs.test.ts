@@ -111,4 +111,58 @@ describe('extractSettledDiffs', () => {
     assert.notEqual(out![0], hunk, 'a hunk with extra keys must be rebuilt into the narrow shape')
     assert.deepEqual(out, [{ path: '/f', oldText: 'a', newText: 'b' }])
   })
+
+  test('narrowDiffs drops a no-op hunk where oldText === newText (non-null)', () => {
+    // A settled reconciliation re-emitting the same block for both sides
+    // contributed zero change. Keeping it would just churn the result
+    // array and burn one downstream block-diff pass per hunk for nothing.
+    const realHunk = { path: '/f', oldText: 'a', newText: 'b' }
+    const noOpHunk = { path: '/f', oldText: 'unchanged', newText: 'unchanged' }
+    const out = narrowDiffs([realHunk, noOpHunk])
+    assert.deepEqual(out, [{ path: '/f', oldText: 'a', newText: 'b' }])
+    assert.equal(out!.length, 1, 'no-op hunks must not appear in the narrowed result')
+  })
+
+  test('narrowDiffs preserves a write-style create (oldText: null, empty newText)', () => {
+    // A `write` with empty content is a meaningful creation (an empty
+    // file), not a no-op. The filter must never drop oldText: null hunks.
+    const out = narrowDiffs([{ path: '/f', oldText: null, newText: '' }])
+    assert.deepEqual(out, [{ path: '/f', oldText: null, newText: '' }])
+  })
+
+  test('narrowDiffs returns null when every hunk in the array is a no-op', () => {
+    // An all-no-op payload is indistinguishable from an empty one for
+    // the caller's purpose ("nothing for the review Workbench to show").
+    // Returning [] would still satisfy `diffs !== null` downstream and
+    // burn an empty iteration; null short-circuits the same way the
+    // empty-diffs branch already does.
+    const out = narrowDiffs([
+      { path: '/f', oldText: 'same', newText: 'same' },
+      { path: '/g', oldText: '', newText: '' },
+    ])
+    assert.equal(out, null)
+  })
+
+  test('extractSettledDiffs falls through to the write fallback when every meta hunk is a no-op', () => {
+    // The no-op filter must NOT swallow a write call's fallback: a write
+    // whose meta.diffs happens to be all-no-op should still surface its
+    // own intended content via the call-args path.
+    const node = {
+      kind: 'tool-result' as const,
+      callId: 'c5',
+      isError: false,
+      call: {
+        name: 'write',
+        argsRaw: JSON.stringify({ file_path: '/work/same.ts', content: 'export const x = 1\n' }),
+      },
+      meta: {
+        diffs: [
+          { path: '/work/same.ts', oldText: 'unchanged', newText: 'unchanged' },
+          { path: '/work/same.ts', oldText: '', newText: '' },
+        ],
+      },
+    }
+    const diffs = extractSettledDiffs(node)
+    assert.deepEqual(diffs, [{ path: '/work/same.ts', oldText: null, newText: 'export const x = 1\n' }])
+  })
 })
