@@ -58,6 +58,7 @@ export function selectTableAxis(editor: Editor, anchor: HTMLElement, axis: Table
 }
 
 export function tableWithMovedRow(table: PmNode, from: number, to: number): PmNode {
+  if (!Number.isFinite(from) || !Number.isFinite(to)) return table
   const rows: PmNode[] = []
   table.forEach((row) => {
     rows.push(row)
@@ -72,6 +73,7 @@ export function tableWithMovedRow(table: PmNode, from: number, to: number): PmNo
 }
 
 export function tableWithMovedColumn(table: PmNode, from: number, to: number): PmNode {
+  if (!Number.isFinite(from) || !Number.isFinite(to)) return table
   const dest = to > from ? to - 1 : to
   const newRows: PmNode[] = []
   table.forEach((row) => {

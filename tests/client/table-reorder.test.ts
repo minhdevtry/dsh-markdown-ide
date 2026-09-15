@@ -164,4 +164,65 @@ describe('Table Drag Reorder', () => {
       editor.destroy()
     }
   })
+
+  test('boundary safety: negative or overflowing target index clamps instead of throwing', () => {
+    const md = `
+| H1 | H2 |
+| --- | --- |
+| A1 | A2 |
+| B1 | B2 |
+`
+    const editor = createTestEditor(md)
+    try {
+      const table = getFirstTable(editor)
+
+      assert.doesNotThrow(() => tableWithMovedRow(table, 1, -100))
+      assert.doesNotThrow(() => tableWithMovedRow(table, 1, 1000))
+      assert.doesNotThrow(() => tableWithMovedColumn(table, 0, -100))
+      assert.doesNotThrow(() => tableWithMovedColumn(table, 0, 1000))
+
+      const movedToStart = tableWithMovedRow(table, 1, -100)
+      assert.deepEqual(extractTableTexts(movedToStart), [
+        ['A1', 'A2'],
+        ['H1', 'H2'],
+        ['B1', 'B2'],
+      ])
+
+      const movedToEnd = tableWithMovedRow(table, 1, 1000)
+      assert.deepEqual(extractTableTexts(movedToEnd), [
+        ['H1', 'H2'],
+        ['B1', 'B2'],
+        ['A1', 'A2'],
+      ])
+    } finally {
+      editor.destroy()
+    }
+  })
+
+  test('boundary safety: non-finite indices (NaN/Infinity) leave the table structure unchanged', () => {
+    const md = `
+| H1 | H2 |
+| --- | --- |
+| A1 | A2 |
+| B1 | B2 |
+`
+    const editor = createTestEditor(md)
+    try {
+      const table = getFirstTable(editor)
+      const original = extractTableTexts(table)
+
+      assert.doesNotThrow(() => tableWithMovedRow(table, NaN, 1))
+      assert.deepEqual(extractTableTexts(tableWithMovedRow(table, NaN, 1)), original)
+      assert.deepEqual(extractTableTexts(tableWithMovedRow(table, 1, NaN)), original)
+      assert.deepEqual(extractTableTexts(tableWithMovedRow(table, Infinity, 1)), original)
+      assert.deepEqual(extractTableTexts(tableWithMovedRow(table, 1, -Infinity)), original)
+
+      assert.deepEqual(extractTableTexts(tableWithMovedColumn(table, NaN, 1)), original)
+      assert.deepEqual(extractTableTexts(tableWithMovedColumn(table, 1, NaN)), original)
+      assert.deepEqual(extractTableTexts(tableWithMovedColumn(table, Infinity, 0)), original)
+      assert.deepEqual(extractTableTexts(tableWithMovedColumn(table, 0, Infinity)), original)
+    } finally {
+      editor.destroy()
+    }
+  })
 })
