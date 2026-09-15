@@ -48,8 +48,11 @@ export interface FlattenOptions {
  * platform separator; git reports forward slashes).
  */
 export function normalize(path: string): string {
-  const forward = path.replace(/\\/g, '/')
-  return forward.length > 1 && forward.endsWith('/') ? forward.slice(0, -1) : forward
+  // Most paths (repeated across a 1000-row tree render) already use forward
+  // slashes, so skip the regex allocation unless a backslash is actually present.
+  const forward = path.indexOf('\\') === -1 ? path : path.replace(/\\/g, '/')
+  const len = forward.length
+  return len > 1 && forward.charCodeAt(len - 1) === 47 /* '/' */ ? forward.slice(0, -1) : forward
 }
 
 /**
@@ -61,8 +64,11 @@ export function relativeTo(root: string, path: string): string | undefined {
   const from = normalize(root)
   const to = normalize(path)
   if (to === from) return ''
-  // The separator check keeps `/work/app2` from matching root `/work/app`.
-  if (!to.startsWith(`${from}/`)) return undefined
+  // Cheap length/char checks first so a non-matching sibling (e.g. `/work/app2`)
+  // never pays for the full `startsWith` scan, and no `${from}/` string is allocated.
+  if (to.length <= from.length || to.charCodeAt(from.length) !== 47 /* '/' */ || !to.startsWith(from)) {
+    return undefined
+  }
   return to.slice(from.length + 1)
 }
 

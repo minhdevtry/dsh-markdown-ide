@@ -11,9 +11,24 @@
  */
 export function basename(path: string): string {
   if (!path) return ''
-  const normalized = path.replace(/\\/g, '/').replace(/\/+$/, '')
+  // Skip the backslash-replace allocation when it can't match, and trim
+  // trailing slashes with a char scan instead of a regex — this runs once
+  // per row when rendering a large file tree, so the common (already-clean,
+  // no-trailing-slash) case should do zero extra allocation.
+  const forward = path.indexOf('\\') === -1 ? path : path.replace(/\\/g, '/')
+  let end = forward.length
+  while (end > 0 && forward.charCodeAt(end - 1) === 47 /* '/' */) end--
+  const normalized = end === forward.length ? forward : forward.slice(0, end)
   const idx = normalized.lastIndexOf('/')
   return idx === -1 ? normalized : normalized.slice(idx + 1)
+}
+
+/** Whether `str` starts with a Windows drive letter followed by `:/` (e.g. `C:/`). */
+function isDriveAbsolute(str: string): boolean {
+  if (str.length < 3) return false
+  const c0 = str.charCodeAt(0)
+  const isLetter = (c0 >= 65 && c0 <= 90) || (c0 >= 97 && c0 <= 122)
+  return isLetter && str.charCodeAt(1) === 58 /* ':' */ && str.charCodeAt(2) === 47 /* '/' */
 }
 
 /**
@@ -29,17 +44,20 @@ export function basename(path: string): string {
  * the same path differently, can never find again).
  */
 export function resolveWorkspacePath(cwd: string | undefined, target: string): string {
-  const normalizedTarget = target.replace(/\\/g, '/')
-  const isAbsolute = normalizedTarget.startsWith('/') || /^[a-zA-Z]:\//.test(normalizedTarget)
+  const normalizedTarget = target.indexOf('\\') === -1 ? target : target.replace(/\\/g, '/')
+  const isAbsolute = normalizedTarget.charCodeAt(0) === 47 /* '/' */ || isDriveAbsolute(normalizedTarget)
   if (isAbsolute) return collapseDotSegments(normalizedTarget)
   if (!cwd) return normalizedTarget
-  const normalizedCwd = cwd.replace(/\\/g, '/').replace(/\/+$/, '')
+  const forwardCwd = cwd.indexOf('\\') === -1 ? cwd : cwd.replace(/\\/g, '/')
+  let cwdEnd = forwardCwd.length
+  while (cwdEnd > 0 && forwardCwd.charCodeAt(cwdEnd - 1) === 47 /* '/' */) cwdEnd--
+  const normalizedCwd = cwdEnd === forwardCwd.length ? forwardCwd : forwardCwd.slice(0, cwdEnd)
   return collapseDotSegments(`${normalizedCwd}/${normalizedTarget}`)
 }
 
 /** Resolve `.`/`..` segments in an already-absolute (POSIX or drive-letter) path. */
 function collapseDotSegments(path: string): string {
-  const isWindowsAbsolute = /^[a-zA-Z]:\//.test(path)
+  const isWindowsAbsolute = isDriveAbsolute(path)
   const prefix = isWindowsAbsolute ? path.slice(0, 3) : '/'
   const rest = isWindowsAbsolute ? path.slice(3) : path.slice(1)
   const parts: string[] = []
