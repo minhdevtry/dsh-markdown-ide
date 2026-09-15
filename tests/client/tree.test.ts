@@ -247,3 +247,92 @@ describe('removeDiacritics and getAcronym', () => {
     assert.equal(slugifyHeading('1. Điểm khởi động (Entrypoint)'), '1-diem-khoi-dong-entrypoint')
   })
 })
+
+// --- Optimization invariants for tree.ts fast paths.
+// The new optional `normalizedRoot` / `statusKeys` params must produce the
+// same answers as the legacy paths, otherwise the hoisting optimisation in
+// `flatten` would silently change a render.
+describe('relativeTo fast path', () => {
+  it('returns the same answer whether normalizedRoot is supplied or computed', () => {
+    const normRoot = normalize(ROOT)
+    assert.equal(relativeTo(ROOT, '/work/app/src/main.ts', normRoot), relativeTo(ROOT, '/work/app/src/main.ts'))
+    assert.equal(relativeTo(ROOT, ROOT, normRoot), '')
+    assert.equal(relativeTo(ROOT, '/work/app2/main.ts', normRoot), undefined)
+  })
+
+  it('accepts a pre-normalised root without re-normalising', () => {
+    // The fast path must trust the caller's claim that `normalizedRoot` is
+    // already normalised and not re-scan it. So a backslash-laden root passed
+    // as already-normalised is returned through unchanged.
+    const normRoot = normalize('C:\\work\\app')
+    assert.equal(relativeTo('C:\\work\\app', 'C:/work/app/src/main.ts', normRoot), 'src/main.ts')
+  })
+})
+
+describe('badgeFor fast path', () => {
+  const statuses = { 'src/main.ts': 'M', 'src/new.ts': '??', 'docs/readme.md': '??' }
+  const statusKeys = Object.keys(statuses)
+
+  it('returns the same file badge whether statusKeys is supplied or computed', () => {
+    assert.equal(
+      badgeFor(ROOT, '/work/app/src/main.ts', 'file', statuses, statusKeys),
+      badgeFor(ROOT, '/work/app/src/main.ts', 'file', statuses),
+    )
+  })
+
+  it('returns the same directory rollup whether statusKeys is supplied or computed', () => {
+    assert.equal(
+      badgeFor(ROOT, '/work/app/src', 'dir', statuses, statusKeys),
+      badgeFor(ROOT, '/work/app/src', 'dir', statuses),
+    )
+  })
+
+  it('uses the hoisted normalised root to skip re-normalising', () => {
+    const normRoot = normalize(ROOT)
+    assert.equal(
+      badgeFor(ROOT, '/work/app/src/main.ts', 'file', statuses, statusKeys, normRoot),
+      'M',
+    )
+  })
+
+  it('still prefers a real letter over untracked when hoisted', () => {
+    assert.equal(
+      badgeFor(ROOT, '/work/app/src', 'dir', statuses, statusKeys),
+      'M',
+    )
+  })
+
+  it('skips keys that are too short to ever start with the prefix', () => {
+    // The new length + charCode boundary check must skip keys shorter than
+    // the relative prefix without an `startsWith` call.
+    const tiny = { 'a': 'M' }
+    assert.equal(badgeFor(ROOT, '/work/app/src', 'dir', tiny, Object.keys(tiny)), undefined)
+  })
+
+  it('skips keys whose boundary char is not a separator', () => {
+    // A sibling whose name shares the prefix but isn't a child of `src` —
+    // boundary charCode must reject it.
+    const siblingish = { 'srcOther/x.ts': 'M' }
+    assert.equal(badgeFor(ROOT, '/work/app/src', 'dir', siblingish, Object.keys(siblingish)), undefined)
+  })
+})
+
+describe('flatten — hoisted work invariants', () => {
+  it('produces the same rows whether statuses are passed or not', () => {
+    const listings = new Map([[ROOT, listing(ROOT, ['src'], ['a.ts'])]])
+    const a = flatten(ROOT, listings, new Set(), { showHidden: false })
+    const b = flatten(ROOT, listings, new Set(), { showHidden: false, statuses: {} })
+    assert.deepEqual(a.map(r => r.path), b.map(r => r.path))
+  })
+
+  it('attaches badges correctly when a status prefix shares a sibling name', () => {
+    // Regression guard for the boundary charCode optimisation: a key whose
+    // literal-prefix is `${rel}` but whose boundary char is not `/` must not
+    // leak through.
+    const rs = new Map([[ROOT, listing(ROOT, ['src', 'srcOther'], [])]])
+    const statuses = { 'src/x.ts': 'M' }
+    const rows = flatten(ROOT, rs, new Set(), { showHidden: false, statuses })
+    assert.equal(rows.find(r => r.name === 'src')?.badge, 'M')
+    assert.equal(rows.find(r => r.name === 'srcOther')?.badge, undefined)
+  })
+})

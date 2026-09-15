@@ -6,6 +6,28 @@
  */
 
 /**
+ * Replace `\\` with `/` only when the input actually contains a backslash,
+ * keeping the original string (zero allocation) on the common POSIX path.
+ * Hot path: called for every row in the file tree.
+ */
+function toForwardSlashes(s: string): string {
+  return s.indexOf('\\') === -1 ? s : s.replace(/\\/g, '/')
+}
+
+/**
+ * Trim every trailing `/` (or `\\`) with a char scan — the same shape as
+ * `basename`'s tail loop, but without the post-trim slice for the common
+ * already-clean case. Used when normalising a workspace root prefix.
+ */
+function stripTrailingForwardSlashes(s: string): string {
+  let end = s.length
+  while (end > 1 && (s.charCodeAt(end - 1) === 47 /* '/' */ || s.charCodeAt(end - 1) === 92 /* '\\' */)) {
+    end--
+  }
+  return end === s.length ? s : s.slice(0, end)
+}
+
+/**
  * Returns the final name component of a path, handling both `/` and `\\`
  * separators as well as trailing slashes.
  */
@@ -15,7 +37,7 @@ export function basename(path: string): string {
   // trailing slashes with a char scan instead of a regex — this runs once
   // per row when rendering a large file tree, so the common (already-clean,
   // no-trailing-slash) case should do zero extra allocation.
-  const forward = path.indexOf('\\') === -1 ? path : path.replace(/\\/g, '/')
+  const forward = toForwardSlashes(path)
   let end = forward.length
   while (end > 0 && forward.charCodeAt(end - 1) === 47 /* '/' */) end--
   const normalized = end === forward.length ? forward : forward.slice(0, end)
@@ -32,6 +54,20 @@ function isDriveAbsolute(str: string): boolean {
 }
 
 /**
+ * Whether `str` starts with a Windows drive letter followed by `:\` or `:/`.
+ * CharCode-based so it avoids the regex compile/match on the hot resolve path.
+ */
+function isDriveAbsoluteAnySep(str: string): boolean {
+  if (str.length < 3) return false
+  const c0 = str.charCodeAt(0)
+  const isLetter = (c0 >= 65 && c0 <= 90) || (c0 >= 97 && c0 <= 122)
+  if (!isLetter) return false
+  if (str.charCodeAt(1) !== 58 /* ':' */) return false
+  const c2 = str.charCodeAt(2)
+  return c2 === 47 /* '/' */ || c2 === 92 /* '\\' */
+}
+
+/**
  * Resolve an agent-reported path (bare relative, `./`/`../`-relative, or
  * already absolute — POSIX or a Windows drive letter) against a session's
  * cwd into one canonical absolute string.
@@ -44,27 +80,61 @@ function isDriveAbsolute(str: string): boolean {
  * the same path differently, can never find again).
  */
 export function resolveWorkspacePath(cwd: string | undefined, target: string): string {
-  const normalizedTarget = target.indexOf('\\') === -1 ? target : target.replace(/\\/g, '/')
-  const isAbsolute = normalizedTarget.charCodeAt(0) === 47 /* '/' */ || isDriveAbsolute(normalizedTarget)
-  if (isAbsolute) return collapseDotSegments(normalizedTarget)
-  if (!cwd) return normalizedTarget
-  const forwardCwd = cwd.indexOf('\\') === -1 ? cwd : cwd.replace(/\\/g, '/')
+  const normalizedTarget = toForwardSlashes(target)
+  // Skip a redundant `./` prefix before joining so the collapsed pass doesn't
+  // have to walk and discard an empty-then-`.` segment on every cwd-relative
+  // call (the most common shape for agent-reported paths).
+  let ntStart = 0
+  const ntLen = normalizedTarget.length
+  while (ntStart + 1 < ntLen
+    && normalizedTarget.charCodeAt(ntStart) === 46 /* '.' */
+    && normalizedTarget.charCodeAt(ntStart + 1) === 47 /* '/' */) {
+    ntStart += 2
+  }
+  const stripped = ntStart === 0 ? normalizedTarget : normalizedTarget.slice(ntStart)
+  const c0 = stripped.charCodeAt(0)
+  const isAbsolute = c0 === 47 /* '/' */ || (c0 !== 92 && isDriveAbsolute(stripped))
+  if (isAbsolute) return collapseDotSegments(stripped)
+  if (!cwd) return stripped
+  const forwardCwd = toForwardSlashes(cwd)
   let cwdEnd = forwardCwd.length
   while (cwdEnd > 0 && forwardCwd.charCodeAt(cwdEnd - 1) === 47 /* '/' */) cwdEnd--
   const normalizedCwd = cwdEnd === forwardCwd.length ? forwardCwd : forwardCwd.slice(0, cwdEnd)
-  return collapseDotSegments(`${normalizedCwd}/${normalizedTarget}`)
+  return collapseDotSegments(ncJoin(normalizedCwd, stripped))
+}
+
+/** Allocate exactly one `${cwd}/${target}` string without an intermediate `'' + '/' + ''` chain. */
+function ncJoin(cwd: string, target: string): string {
+  // The common case: cwd is non-empty, target has no leading slash (we've
+  // already stripped `./` and verified it's not absolute above). One concat.
+  return cwd === '' ? target : `${cwd}/${target}`
 }
 
 /** Resolve `.`/`..` segments in an already-absolute (POSIX or drive-letter) path. */
 function collapseDotSegments(path: string): string {
   const isWindowsAbsolute = isDriveAbsolute(path)
+  const len = path.length
   const prefix = isWindowsAbsolute ? path.slice(0, 3) : '/'
-  const rest = isWindowsAbsolute ? path.slice(3) : path.slice(1)
+  // Single-pass manual scan + slice: skips `.`/`..`/empty segments without
+  // allocating the substring `String#split` would hand back for every empty
+  // piece. The `parts.join('/')` at the end is still a single allocation.
   const parts: string[] = []
-  for (const part of rest.split('/')) {
-    if (part === '' || part === '.') continue
-    if (part === '..') { parts.pop(); continue }
-    parts.push(part)
+  let segStart = isWindowsAbsolute ? 3 : 1
+  for (let i = segStart; i <= len; i++) {
+    if (i !== len && path.charCodeAt(i) !== 47 /* '/' */) continue
+    const segLen = i - segStart
+    if (segLen === 0) {
+      // empty segment from consecutive slashes — skip with no allocation
+    } else if (segLen === 1 && path.charCodeAt(segStart) === 46 /* '.' */) {
+      // single `.` — skip
+    } else if (segLen === 2
+      && path.charCodeAt(segStart) === 46
+      && path.charCodeAt(segStart + 1) === 46) {
+      parts.pop()
+    } else {
+      parts.push(path.slice(segStart, i))
+    }
+    segStart = i + 1
   }
   return prefix + parts.join('/')
 }
@@ -134,13 +204,13 @@ export function resolveRelativePath(currentFilePath: string, relativePath: strin
     return `${currentFilePath}${hash}`
   }
 
-  if (rawPath.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(rawPath)) {
-    return `${rawPath.replace(/\\/g, '/')}${hash}`
+  if (rawPath.charCodeAt(0) === 47 /* '/' */ || isDriveAbsoluteAnySep(rawPath)) {
+    return `${toForwardSlashes(rawPath)}${hash}`
   }
-  const normCurrent = currentFilePath.replace(/\\/g, '/')
+  const normCurrent = toForwardSlashes(currentFilePath)
   const currentDir = normCurrent.slice(0, Math.max(0, normCurrent.lastIndexOf('/')))
   const parts = currentDir ? currentDir.split('/').filter(Boolean) : []
-  const relParts = rawPath.replace(/\\/g, '/').split('/')
+  const relParts = toForwardSlashes(rawPath).split('/')
 
   for (const part of relParts) {
     if (!part || part === '.') continue
@@ -151,7 +221,7 @@ export function resolveRelativePath(currentFilePath: string, relativePath: strin
     }
   }
 
-  const prefix = normCurrent.startsWith('/') ? '/' : ''
+  const prefix = normCurrent.charCodeAt(0) === 47 /* '/' */ ? '/' : ''
   return `${prefix}${parts.join('/')}${hash}`
 }
 
@@ -203,9 +273,9 @@ export function getDocLinkInfo(
     }
   }
 
-  const normCurrent = currentFilePath.replace(/\\/g, '/')
-  const normTarget = cleanTarget.replace(/\\/g, '/')
-  const normRoot = workspaceRoot ? workspaceRoot.replace(/\\/g, '/').replace(/\/+$/, '') : undefined
+  const normCurrent = toForwardSlashes(currentFilePath)
+  const normTarget = toForwardSlashes(cleanTarget)
+  const normRoot = workspaceRoot ? stripTrailingForwardSlashes(toForwardSlashes(workspaceRoot)) : undefined
   const currentDir = normCurrent.slice(0, Math.max(0, normCurrent.lastIndexOf('/')))
 
   // Calculate href (proper relative path for storage & link resolution)
