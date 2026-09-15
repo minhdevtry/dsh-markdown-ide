@@ -1,4 +1,4 @@
-node_modules/
+node_modules
 .dsh/
 *.log
 .DS_Store
@@ -13,3 +13,5 @@ plugins/*/lib/
 epytor/
 .tmpaudit/
 .tmpv/
+.sandboxes/
+.autonomous/
