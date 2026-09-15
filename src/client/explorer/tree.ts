@@ -48,11 +48,22 @@ export interface FlattenOptions {
  * platform separator; git reports forward slashes).
  */
 export function normalize(path: string): string {
-  // Most paths (repeated across a 1000-row tree render) already use forward
-  // slashes, so skip the regex allocation unless a backslash is actually present.
-  const forward = path.indexOf('\\') === -1 ? path : path.replace(/\\/g, '/')
-  const len = forward.length
-  return len > 1 && forward.charCodeAt(len - 1) === 47 /* '/' */ ? forward.slice(0, -1) : forward
+  // Hot path: this runs once per entry per tree render. The common input is
+  // already a clean POSIX path, so the fast path returns the input untouched
+  // with only one indexOf scan + one charCodeAt.
+  const len = path.length
+  if (len === 0) return ''
+  const last = path.charCodeAt(len - 1)
+  const hasTrailingSep = last === 47 /* '/' */ || last === 92 /* '\\' */
+  const bsIdx = path.indexOf('\\')
+  if (bsIdx === -1 && !hasTrailingSep) return path
+
+  // Either has a trailing separator, a backslash, or both. Skip the regex
+  // allocation when no backslash is present, then drop any trailing slash
+  // without dropping the bare root (`/` alone must survive).
+  const forward = bsIdx === -1 ? path : path.replace(/\\/g, '/')
+  const flen = forward.length
+  return flen > 1 && forward.charCodeAt(flen - 1) === 47 ? forward.slice(0, -1) : forward
 }
 
 /**
@@ -60,8 +71,11 @@ export function normalize(path: string): string {
  * porcelain uses.
  * @returns the relative path, or undefined when `path` is not under `root`.
  */
-export function relativeTo(root: string, path: string): string | undefined {
-  const from = normalize(root)
+export function relativeTo(root: string, path: string, normalizedRoot?: string): string | undefined {
+  // Hot path on a 1000-row tree render. `flatten` already normalises the
+  // root once and threads it through, so when it's pre-supplied we skip the
+  // per-row `normalize(root)` scan entirely.
+  const from = normalizedRoot ?? normalize(root)
   const to = normalize(path)
   if (to === from) return ''
   // Cheap length/char checks first so a non-matching sibling (e.g. `/work/app2`)
@@ -79,6 +93,9 @@ export function relativeTo(root: string, path: string): string | undefined {
  * whose subtree contains changes, which is what makes a collapsed tree
  * scannable. A rollup prefers a real letter over the untracked marker so a
  * folder holding one edited and several new files still reads as modified.
+ *
+ * `statusKeys` and `normalizedRoot` are hoisted-work hooks for `flatten`'s
+ * hot path; external callers can omit both and pay the standard cost.
  * @returns the porcelain letter, or undefined when nothing applies.
  */
 export function badgeFor(
@@ -86,16 +103,24 @@ export function badgeFor(
   path: string,
   kind: RowKind,
   statuses: GitStatuses | undefined,
+  statusKeys?: readonly string[],
+  normalizedRoot?: string,
 ): string | undefined {
   if (statuses === undefined) return undefined
-  const rel = relativeTo(root, path)
+  const rel = relativeTo(root, path, normalizedRoot)
   if (rel === undefined || rel === '') return undefined
   if (kind === 'file') return statuses[rel]
 
   const prefix = `${rel}/`
+  // Reusing the caller's pre-computed `Object.keys(statuses)` saves one
+  // tuple-array allocation per row — the dominant cost in a big render —
+  // by skipping `Object.entries` and looking up the code directly.
+  const keys = statusKeys ?? Object.keys(statuses)
   let untracked: string | undefined
-  for (const [key, code] of Object.entries(statuses)) {
-    if (!key.startsWith(prefix)) continue
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i]!
+    if (key.length <= rel.length || key.charCodeAt(rel.length) !== 47 || !key.startsWith(prefix)) continue
+    const code = statuses[key]
     if (code === '??') { untracked = code; continue }
     return code
   }
@@ -128,6 +153,18 @@ export function flatten(
   const rows: TreeRow[] = []
   const visited = new Set<string>()
 
+  // Hot path hoisting: every row crossing this call resolves against the same
+  // root and queries the same status map, so we normalise the root and
+  // capture `Object.keys(statuses)` once and thread them through. Without
+  // hoisting, a 1000-row render pays for 1000 redundant `normalize(root)`
+  // scans and 1000 redundant `[key,value][]` allocations from
+  // `Object.entries`.
+  const normRoot = normalize(root)
+  const statuses = options.statuses
+  const statusKeys = statuses === undefined ? undefined : Object.keys(statuses)
+  const addBadge = (path: string, kind: RowKind): { badge?: string } =>
+    badgeOf(normRoot, path, kind, statuses, statusKeys)
+
   // Every path crossing this function is normalised. The host joins with the
   // platform separator, git reports forward slashes, and the caller keys its
   // caches and its expansion set by normalised path — mixing the two forms
@@ -153,7 +190,7 @@ export function flatten(
         depth,
         expanded: isExpanded,
         hidden: entry.hidden,
-        ...badgeOf(root, path, 'dir', options.statuses),
+        ...addBadge(path, 'dir'),
       })
       if (isExpanded) walk(path, depth + 1)
     }
@@ -167,26 +204,30 @@ export function flatten(
         depth,
         expanded: false,
         hidden: entry.hidden,
-        ...badgeOf(root, path, 'file', options.statuses),
+        ...addBadge(path, 'file'),
       })
     }
   }
 
-  walk(normalize(root), 0)
+  walk(normRoot, 0)
   return rows
 }
 
 /**
  * `exactOptionalPropertyTypes` forbids assigning an explicit `undefined` to an
  * optional member, so an absent badge must be an absent key.
+ *
+ * Threading `normRoot` / `statusKeys` through skips per-row work that
+ * `flatten` has already done for the whole render.
  */
 function badgeOf(
-  root: string,
+  normRoot: string,
   path: string,
   kind: RowKind,
   statuses: GitStatuses | undefined,
+  statusKeys: readonly string[] | undefined,
 ): { badge?: string } {
-  const badge = badgeFor(root, path, kind, statuses)
+  const badge = badgeFor(normRoot, path, kind, statuses, statusKeys, normRoot)
   return badge === undefined ? {} : { badge }
 }
 

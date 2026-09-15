@@ -232,3 +232,96 @@ describe('getDocLinkInfo', () => {
     assert.equal(result.href, './Modal.tsx#usage')
   })
 })
+
+// --- Optimization invariants: the new fast paths must stay byte-identical
+// to the legacy behaviour. Each case below is a regression guard against an
+// optimisation reordering an allocation or short-circuit that would change a
+// return value.
+
+describe('resolveWorkspacePath — optimization invariants', () => {
+  test('strips multiple leading ./ segments before joining', () => {
+    assert.equal(resolveWorkspacePath('/home/user/project', '././src/a.ts'), '/home/user/project/src/a.ts')
+    assert.equal(resolveWorkspacePath('/home/user/project', './../src/a.ts'), '/home/user/src/a.ts')
+  })
+
+  test('handles a single dot as the entire relative target', () => {
+    assert.equal(resolveWorkspacePath('/home/user/project', '.'), '/home/user/project')
+  })
+
+  test('collapses a path with mixed . and .. segments', () => {
+    assert.equal(resolveWorkspacePath('/a/b/c', './d/../e/./f'), '/a/b/c/e/f')
+  })
+
+  test('preserves the trailing component when cwd itself ends with a slash', () => {
+    assert.equal(resolveWorkspacePath('/home/user/project///', 'a.ts'), '/home/user/project/a.ts')
+  })
+
+  test('returns the drive-letter prefix when the relative target collapses to a drive root', () => {
+    assert.equal(resolveWorkspacePath(undefined, 'C:\\..\\..'), 'C:/')
+  })
+
+  test('handles consecutive slashes between cwd and target', () => {
+    // The manual scanner in collapseDotSegments must still treat `//` as a
+    // single separator boundary.
+    assert.equal(resolveWorkspacePath('/home/user/project', 'src//a.ts'), '/home/user/project/src/a.ts')
+  })
+})
+
+describe('resolveRelativePath — optimization invariants', () => {
+  test('treats a Windows drive-letter target with backslash separator as absolute', () => {
+    // The previous regex `/^[a-zA-Z]:[\\/]/` was replaced with a charCode-based
+    // check; this test guards that the new check accepts both `C:\` and `C:/`.
+    assert.equal(resolveRelativePath('/a/b/c.md', 'C:\\x\\y.md'), 'C:/x/y.md')
+    assert.equal(resolveRelativePath('/a/b/c.md', 'D:/x/y.md'), 'D:/x/y.md')
+  })
+
+  test('handles a backslash relative path against a forward-slash cwd', () => {
+    assert.equal(resolveRelativePath('/a/b/c.md', '..\\utils\\path.ts'), '/a/utils/path.ts')
+  })
+
+  test('preserves a leading POSIX slash on a relative target', () => {
+    assert.equal(resolveRelativePath('/a/b/c.md', '/elsewhere.md#frag'), '/elsewhere.md#frag')
+  })
+
+  test('keeps the prefix `/` for absolute POSIX current paths', () => {
+    assert.equal(resolveRelativePath('/a/b/c.md', './d.md'), '/a/b/d.md')
+  })
+
+  test('handles a bare relative target without ./ prefix', () => {
+    assert.equal(resolveRelativePath('/a/b/c.md', 'd.md'), '/a/b/d.md')
+  })
+})
+
+describe('getDocLinkInfo — optimization invariants', () => {
+  test('strips trailing slashes from workspaceRoot before matching', () => {
+    const result = getDocLinkInfo(
+      '/root/components/Button.tsx',
+      '/root/explorer/FileTree.tsx',
+      '/root///',
+    )
+    assert.equal(result.title, 'explorer/FileTree')
+    assert.equal(result.href, '../explorer/FileTree.tsx')
+  })
+
+  test('strips trailing backslashes from workspaceRoot', () => {
+    const result = getDocLinkInfo(
+      '/root/components/Button.tsx',
+      '/root/explorer/FileTree.tsx',
+      '\\root\\\\',
+    )
+    assert.equal(result.title, 'explorer/FileTree')
+    assert.equal(result.href, '../explorer/FileTree.tsx')
+  })
+
+  test('does not strip the lone root prefix', () => {
+    // The helper must keep `/` alone and not drop via `len > 1`.
+    const result = getDocLinkInfo(
+      '/root/components/Button.tsx',
+      '/root/explorer/FileTree.tsx',
+      '/',
+    )
+    // With workspaceRoot = `/`, every absolute path is inside, so the title
+    // is built relative to root.
+    assert.equal(result.title, 'root/explorer/FileTree')
+  })
+})
